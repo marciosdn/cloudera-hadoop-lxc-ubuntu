@@ -1,0 +1,131 @@
+PRÉALABLES
+
+Virtual machine VIRTUALBOX
+1.	Linux - Ubuntu(64-bit);
+2.	8192 MB RAM (more, better);
+3.	100 GB disque dur VDI, dynamically allocated (I used SSD one);
+4.	2 vCPU (4 ou plus recomandé);
+5.	1 NAT network, avec Port Forwarding (required :22, 7180, 8888; optonal: 80, 443,  8088, 8021, 8032, 9083, 50010, 50070, 50090, 11000, etc).
+
+OS LINUX UBUNTU 16.04 SERVER
+6.	http://releases.ubuntu.com/16.04/ubuntu-16.04.5-server-amd64.iso
+INSTALLATION DU SYSTÈME D’EXPLOITATION
+
+7.	Sélectionner le fichier image et démarrer l'installation du système d'exploitation. 
+
+8.	Utiliser le nome "lxc" pour la machine (hostname), créer un utilisateur générique et accepter les autres options par défaut.
+
+9.	Ajouter "OpenSSH server" aux logiciels sélectionnés.
+
+PRÉPARATION DE L’HOST LXC
+10.	RECOMENDATION : Utiliser un client ssh pour exécuter les commandes avec COPIER-COLLER!
+11.	INFORMATION : Par default, le SSH N’ACCEPTE PAS le login avec root.
+12.	Faire le login avec l'utilisateur créé pendant l’installation.
+13.	Créer un mot de passe pour le root (Root!234):
+sudo su -
+
+echo -e "Root\!234\nRoot\!234" | passwd
+
+14.	Update, upgrade et installation des paquets (s’ils sont déjà installés, pas grave) :
+apt update && apt -y upgrade && apt -y install sudo openssh-client openssh-server rsync wget ntp iproute iptables-persistent lxc
+
+15.	DHCP par nom de conteneur LXC :
+sed -i 's/#LXC_DHCP_CONFILE/LXC_DHCP_CONFILE/' /etc/default/lxc-net; echo 'dhcp-hostsfile=/etc/lxc/dnsmasq-hosts.conf' | sudo tee -a /etc/lxc/dnsmasq.conf; echo -e "lcdhX,10.0.3.10\nlcdh1,10.0.3.101\nlcdh2,10.0.3.102\nlcdh3,10.0.3.103\nlcdh4,10.0.3.104\nlcdh5,10.0.3.105" | sudo tee -a /etc/lxc/dnsmasq-hosts.conf; service lxc-net restart; killall -s SIGHUP dnsmasq
+
+16.	DNS (fichier /etc/hosts) de la machine hôte :
+echo -e "127.0.0.1       localhost\n10.0.3.1        lxc\n10.0.3.10       lcdhX\n10.0.3.101      lcdh1\n10.0.3.102      lcdh2\n10.0.3.103      lcdh3\n10.0.3.104      lcdh4\n10.0.3.105      lcdh5" | sudo tee /etc/hosts
+
+17.	Créer utilisateur et group pour le Hadoop (hduser/hadoop) et concéder droites de non utiliser mot de passe (hduser) pour le SUDO :
+groupadd hadoop && echo -e "\n#Allow no password\n%hadoop         ALL = (ALL) NOPASSWD: ALL" >> /etc/sudoers; useradd hduser -s $(which bash) -m -g hadoop; usermod -G sudo hduser; echo -e "hduser\nhduser" | passwd hduser
+
+18.	Créer clé ssh pour hduser et ajouter permissions d’accès :
+su hduser -c "cd ~ && ssh-keygen -t rsa -N '' -f ~/.ssh/id_rsa && cat ~/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys"
+
+19.	À partir d’ici, utiliser l’utilisateur hduser pour se logger à l’host lxc, la machine virtuel VirtualBox.
+exit
+
+CRÉER LE CONTENEUR MODÈLE
+20.	Se logger comme hduser (toujours la même recommandation, utiliser SSH).
+su - hduser
+
+21.	Créer le premier container modèle lcdhX, definir limite de disque et mémoire, lui démarrer et définir mot de passe pour le root :
+sudo lxc-create -t download -n lcdhX -B lvm --vgname lxc-vg --lvname lcdhX --fssize 2G -- -d ubuntu -r xenial -a amd64 && echo "lxc.cgroup.memory.limit_in_bytes = 2048M" | sudo tee -a /var/lib/lxc/lcdhX/config && sudo lxc-start -d -n lcdhX
+&& sudo lxc-attach -n lcdhT -- bash -c 'echo -e "Root\!234\nRoot\!234" | passwd'
+sudo lxc-attach -n lcdhX
+
+echo -e "Root\!234\nRoot\!234" | passwd
+
+22.	Observer qu’après le « attach », nous sommes sur le CONTENEUR. 
+23.	Update, upgrade et installation des paquets (s’ils sont déjà installés, pas grave) :
+apt update && apt -y upgrade && apt -y install sudo openssh-client openssh-server rsync ntp wget
+
+24.	Créer utilisateur et group pour le Hadoop (hduser/hadoop) et concéder droites de non utiliser mot de passe (hduser) pour le SUDO :
+groupadd hadoop && echo -e "\n#Allow no password\n%hadoop         ALL = (ALL) NOPASSWD: ALL" >> /etc/sudoers; useradd hduser -s $(which bash) -m -g hadoop; usermod -G sudo hduser; echo -e "hduser\nhduser" | passwd hduser
+
+25.	Créer clé ssh pour hduser et ajouter permissions d’accès :
+su hduser -c "cd ~ && ssh-keygen -t rsa -N '' -f ~/.ssh/id_rsa && cat ~/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys"
+
+26.	Quitter le conteneur modèle :
+exit
+
+27.	Ajouter clé ssh du host :
+ssh-copy-id -o StrictHostKeyChecking=no hduser@lcdhX
+
+CLONER LE CONTENEUR MODÈLE
+28.	Arrêter le conteneur modèle :
+sudo lxc-stop -n lcdhX
+
+29.	Cloner, configurer auto démarrage ordonné; démarrer et configurer fichier hosts (DNS) :
+for i in {1..4}; do lcdh='lcdh'${i}; sudo lxc-clone -o lcdhX -n ${lcdh} -L 16G && echo -e "lxc.start.auto = 1\nlxc.start.delay = 5\nlxc.start.order = ${lcdh: -1}0" | sudo tee -a /var/lib/lxc/${lcdh}/config && sudo lxc-start -d -n ${lcdh}; ssh -o StrictHostKeyChecking=no ${lcdh} sudo echo -e '"127.0.0.1       localhost\n10.0.3.1        lxc\n10.0.3.10       lcdhX\n10.0.3.101      lcdh1\n10.0.3.102      lcdh2\n10.0.3.103      lcdh3\n10.0.3.104      lcdh4\n10.0.3.105      lcdh5" | sudo tee /etc/hosts'; done;
+
+CONFIGURER LES RÈGLES DU PARE-FEU IPTABLES POUR DONNER ACCÈS EXTERNE AUX SERVICE HADOOP :
+30.	Créer les règles désirées :
+sudo iptables -t nat -A PREROUTING -p tcp --dport 8888 -j DNAT --to 10.0.3.101:8888;sudo iptables -t nat -A PREROUTING -p tcp --dport 8088 -j DNAT --to 10.0.3.101:8088;sudo iptables -t nat -A PREROUTING -p tcp --dport 50010 -j DNAT --to 10.0.3.101:50010;sudo iptables -t nat -A PREROUTING -p tcp --dport 50070 -j DNAT --to 10.0.3.101:50070;sudo iptables -t nat -A PREROUTING -p tcp --dport 50090 -j DNAT --to 10.0.3.101:50090;sudo iptables -t nat -A PREROUTING -p tcp --dport 8021 -j DNAT --to 10.0.3.101:8021;sudo iptables -t nat -A PREROUTING -p tcp --dport 8032 -j DNAT --to 10.0.3.101:8032;sudo iptables -t nat -A PREROUTING -p tcp --dport 9083 -j DNAT --to 10.0.3.101:9083;sudo iptables -t nat -A PREROUTING -p tcp --dport 11000 -j DNAT --to 10.0.3.101:11000
+
+31.	Enregistré les règles de façons permanent (sinon les règles seront effacées pendant un redémarrage) :
+sudo netfilter-persistent save
+
+INSTALLER LE CLOUDERA MANAGER
+32.	Ajuster les paramètres de « swap » de l’hôte:
+echo -e "\nvm.swappiness = 10" | sudo tee -a /etc/sysctl.conf && sudo sysctl vm.swappiness=10
+ssh lcdh4 sudo cat /proc/sys/vm/swappiness
+
+33.	Augmenter la mémoire du « node master », lcdh1, vers 6GB :
+sudo sed -i 's/lxc.cgroup.memory.limit_in_bytes = 2048M/lxc.cgroup.memory.limit_in_bytes = 6144M/' /var/lib/lxc/lcdh1/config && sudo lxc-stop -n lcdh1 && sudo lxc-start -d -n lcdh1
+ 
+34.	Télécharger et installer Cloudera Manager sur l’hôte lxc :
+wget http://archive.cloudera.com/cm5/installer/latest/cloudera-manager-installer.bin && chmod u+x cloudera-manager-installer.bin && sudo ./cloudera-manager-installer.bin
+
+35.	Vérifier qu’ils sont bien en marche (running) :
+sudo lxc-ls -f
+
+for i in {1..4}; do echo lcdh${i}; ssh lcdh${i} 'free -h && df -h | grep vg'; done;
+for i in {1..4}; do sudo lxc-stop -n lcdh${i}; done;
+
+36.	Pour vérifier les règles iptable :
+sudo iptables -t nat -L
+
+37.	Exécuter le Cloudera Manager: http://localhost:7180
+38.	Acceder Hue Server: http://localhost:8888
+39.	Acceder Hadoop NameNode Overview http://localhost:50070
+40.	Acceder Hadoop YARN Resource Manager http://localhost:8088
+
+References
+https://www.cloudera.com/documentation/enterprise/5-15-x/topics/prepare_cm_database.html
+https://www.cloudera.com/documentation/enterprise/5-15-x/topics/cli_install_jdk.html
+https://www.cloudera.com/documentation/enterprise/5-5-x/topics/cm_mc_role_instances.html
+https://www.cloudera.com/documentation/enterprise/5-2-x/topics/cdh_ig_ports_cdh5.html
+https://help.ubuntu.com/lts/serverguide/lxc.html
+https://stgraber.org/2013/12/21/lxc-1-0-your-second-container/
+https://askubuntu.com/questions/446831/how-to-let-built-in-dhcp-assign-a-static-ip-to-lxc-container-based-on-name-not
+https://askubuntu.com/questions/103915/how-do-i-configure-swappiness
+https://serverfault.com/questions/487522/lxc-port-forwarding-and-iptables
+https://www.cyberciti.biz/faq/how-do-i-save-iptables-rules-or-settings/
+https://www.cyberciti.biz/faq/howto-set-bash-as-your-default-shell/
+https://serverfault.com/questions/160581/how-to-setup-passwordless-sudo-on-linux
+http://www.grymoire.com/Unix/Sed.html
+https://www.computerhope.com/unix/utee.htm
+https://linuxcommando.blogspot.com/2008/10/how-to-disable-ssh-host-key-checking.html
+https://askubuntu.com/questions/229309/how-to-use-sudo-with-pipelines
+https://www.upguard.com/articles/docker-vs-lxc
+https://wiki.deimos.fr/LXC_:_Install_and_configure_the_Linux_Containers#Create_a_container
